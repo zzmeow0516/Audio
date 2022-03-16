@@ -1,0 +1,268 @@
+3.1:ubuntu系统配置，软件安装。AudioTrack大致过程
+Ubuntu:
+1.sudo apt-get install *** 失败。
+解决方案：sudo apt-get update 
+
+2.Could not get lock 	/var/lib/dpkg/lock......
+Solve: ps afx|grep apt
+ sudo Kill -9 1234
+
+ sudo rm /var/lib/dpkg/lock
+sudo dpkg --configure -a
+sudo apt-get update
+
+
+AudioTrack:
+audiotrack(只用于播放PCM数据流）
+应用场合：时延要求高。
+
+代码：
+AudioTrack test_track = new AudioTrack(STREAM_TYPE,SR,CONF,FORMAT,minBuffersize,MODE);
+track.write(data, 0, data.length);
+track.play();
+track.release();
+
+
+详解：步骤：1.创建一个AudioTrack的实例2.调用track.write写入回放数据3.调用 play() 开始播放4.播放完成后调用 release() 释放 AudioTrack 实例.
+
+STREAM_TYPE:STREAM_VOICE_CALL,STREAM_SYSTEM,STREAM_RING,STREAM_MUSIC,STREAM_ALARM,STREAM_NOTIFICATION,STREAM_DTMF.
+
+FORMAT:AudioFormat.ENCODING_PCM_16BIT,AudioFormat.ENCODING_PCM_8BIT.
+
+MODE：MODE_STATIC,MODE_STREAM.
+
+minBufferSize通过AudioTrack.getMinBufferSize获取。（××）
+
+3.2:AudioTrack具体构建setup过程
+
+创建过程：
+path:/java/android/media/AudioTrack.java：
+1.构造AudioTrack函数
+2.获取主线程looper（××）
+3.获取参数类型
+4.参数检查audioParamCheck
+5.调用native_setup
+path:/jni/android_media_AudioTrack.cpp：
+1.用 JNINativeMethod gMethods[] 将 native_setup替换成 android_media_AudioTrack_setup.
+
+（native层）AudioTrack.cpp：
+1.创建native层的AudioTrack对象.
+path:/jni/android_media_AudioTrack.cpp：
+从AudioSystem中获取信息：AudioSystem::getOutput***();
+*** : SamplingRate / FrameCount / Latency / ForPttr / Effect /SampllingRate
+
+path:/libaudioclient/AudioTrack.cpp：
+1.AudioTrack::set()设置setup所需各项参数;
+2.create the IAudioTrack.
+
+ 
+3.3:AudioFlinger,AudioSystem，createtrack???
+
+建立完createTrack_l之后，下一步是？	
+总：在AudioTrack.cpp里面调用AudioFlinger::createTrack()里的createTrack_l()来完成音频策略服务最终返回AudioTrack.
+
+分： 时序图：4。Audiosystem::getoutputforattr();,然后在audiopolicyservice::getoutputforattr(),然后再audiopolicymanager::getoutputforattr().这一步叫做通过binder机制 （××）获取音频策略服务。
+下一步是在audiotrack.cpp中调用audioflinger::createtrack();所以就到了audioflinger.cpp下，
+为什么要调用呢？：：理由是用来创建share buffer。 利用共享内存提高效率。APP中的 AudioTrack与PlaybackThread可以访问同一块内存.
+Q:共享内存是谁创建的呢？
+A：根据MODE判断，若是MODE_STATIC，则由APP中AudioTrack创建；若是MODE_STREAM，则是PlaybackThread创建。
+那么audioflinger::createtrack()方法如何工作呢？
+先看定义：
+
+//获取回放线程PlaybackThread 
+PlaybackThread *thread = checkPlaybackThread_l(output);
+//调用刚才获取到的playbackthread中的createtrack_l()
+track = thread->createTrack_l(...);
+//创建track的binder对象trackhandle,然后返回给audiotrack
+trackHandle = new TrackHandle(track);
+return trackHandle;
+
+到此为止，audiotrack_setup结束。
+
+
+3.4:createTrack具体步骤
+
+1.//获取回放线程PlaybackThread.
+path:/frameworks/av/services/audioflinger/AudioFlinger.cpp:
+
+PlaybackThread *thread = checkPlaybackThread_l(output);
+
+2.//调用AudioFlinger::PlaybackThread::createTrack_l()，使用new Track来实现share buffer
+path:: /frameworks/av/services/audioflinger/AudioFlinger.cpp:
+
+track = thread->createTrack_l(...);
+path:/frameworks/av/services/audioflinger/Threads.cpp：
+
+track = new Track(...);  //创建playbackthread::track。
+...
+mTracks.add(track);    //将track加入到playbackthread的track列表mtracks中。
+
+3.在AudioFlinger中创建出来的Track需要通过binder对象才能被传回AudioTrack,因此先在AudioFlinger中创建BnBinder对象:TrackHandle.
+path: /frameworks/av/services/audioflinger/AudioFlinger.cpp:
+
+sp<TrackHandle> trackHandle;
+...
+trackHandle = new TrackHandle(track);
+...
+return trackHandle;
+
+4.AudioFlinger::createTrack()返回TrackHandle,其中包含set信息。再返回到AudioTrack.
+path: /frameworks/av/media/libaudioclient/AudioTrack.cpp:
+
+sp<IAudioTrack> track = audioFlinger->createTrack(...);
+mAudioTrack = track;
+
+下一步是？
+准备完毕，开始start.
+audiotrack_start()函数.
+
+
+3.7:从头整理一遍audiotrack_setup;start,stop...
+
+
+3.4.1 new track继承了trackbase..这一部分没有深入跟踪（×××）其他的按照audiotrack_1的图来，基本没问题。
+
+start步骤：
+
+在start()之前，audiotrack::createtrack_l()最后执行maudiotrack = track ; 
+start只是调用track->start()来实现音频输出。
+path:libaudioclient/AudioTrack.cpp
+status = mAudioTrack->start(&status);
+
+path:audioflinger/Tracks.cpp
+AudioFlinger::PlaybackThread::Track::start(){
+...
+PlaybackThread *playbackThread = (PlaybackThread *)thread.get();
+...
+status = playbackThread->addTrack_l(this);
+...
+}
+
+
+
+AudioFlinger::PlaybackThread::addTrack_l（）：
+在addTrack_l方法内，主要步骤有三个：
+//如果该track（share buffer）是新增track，则需要调用startOutput进行初始化
+status = AudioSystem::startOutput(track->portId()) ;
+//把该track加入mActiveTracks
+mActiveTracks.add(track);
+//发送广播，通知MixerThread开始工作
+broadcast_l();
+
+
+3.8:学习audiotrack::write( ).
+学习AudioFlinger：：openOutput,
+AudioPolicyManager：：getOutputForDevices
+
+1.audiotrack::write( )
+1.path:AudioTrack.java::write():参数和状态验证，调用native_write_byte。
+2.JNI层：native_write_byte()--------->>>android_media_AudioTrack_writeArray()
+2.1AudioTrack::writeArray():
+	2.1.1//取出之前创建的AudioTrack。
+	sp<AudioTrack> lpTrack = getAudioTrack(env, thiz);
+	2.1.2//参数检查..
+	2.1.3//将取出的audiotrack 写入
+	jint samplesWritten = writeToTrack(lpTrack，......)
+		2.1.3.1//将数据给本地的AudioTrack的对象。如果共享buffer为0，stream		模式，则写入数据.
+		 if (track->sharedBuffer() == 0)
+		{
+		 written = track->write()
+		....
+		}
+		2.1.3.2//参数检查...
+		2.1.3.3//obtainBuffer()获取可用Buffer。
+		status_t err = obtainBuffer()
+			2.1.3.3.1 //获得一个代理，进入proxy的obtainBuffer(),这里应该进入到AudioTrackClientProxy,AudioTrackClientProxy继承ClinetProxy,所以用
+path:libaudioclient/AudioTrackShared.cpp下的 ClientProxy::obtainBuffer（）。
+				code:
+				sp<AudioTrackClientProxy> proxy;
+				proxy = mProxy;
+				status = proxy->obtainBuffer(...);
+				...
+				//获取客户端对象
+				audio_track_cblk_t* cblk = mCblk;
+				...
+				//得到一个有数据的obtainbuffer。获得buffer的帧数和size。
+				return status;
+		2.1.3.4//memcpy()写入,进行memcpy()后，获得copy后的audiobuffer。
+				memcpy(audioBuffer.i8, buffer, toWrite);
+			2.1.3.5//释放buffer
+				releaseBuffer(&audioBuffer);
+				2.1.3.5.1 
+				 mProxy->releaseBuffer(&buffer);
+
+				
+
+重点函数分析：
+1.AudioFlinger::openOutput()
+
+
+3.9:AudioFlinger::openOutput()
+
+1.openoutput_l()
+1.1findsuitablehwdev_l()		//加载module，并初始化其操作函数。
+1.1.1 loadHwModule_l()
+1.1.1.1 strncmp()		//字符遍历，检查是否已经加载过mAudioHwDevs
+1.1.1.2 mDevicesFactoryHal->openDevice()
+//根据名字获取AudioHwDev，并打开
+1.1.1.2.1path:libaudiohal/impl/DevicesFactoryHalLocal.cpp
+method:load_audio_interface():
+hw_get_module_by_class。//获取module
+audio_hw_device_open。 //打开设备，对该module的操作函数进行初始化.
+audio_hw_device_close。
+1.1.1.3 nextUniqueId()//创建AudioHwDev唯一对应的ID
+1.1.1.4 mAudioHwDevs.add(handle, audioDevice);
+//handle和AudioHwDevice是一对键值对，传入mAudioHwDevs列表里，通过audio_module_handle_t类型变量handle，可以获得硬件设备，把这个设备加入设备数组中进行维护.
+1.1.2 path:libaudiohal/impl/DeviceHalLocal.cpp:
+method:getSupportedDevices()
+
+
+3.10:接上AudioFlinger::openOutput()
+
+1.2 path:audioflinger/AudioHwDevice.cpp:
+openOutputStream()				//打开音频输出流～
+1.2.1 new AudioStreamOut()	//创建AudioStreamOut音频输出流
+1.2.2 outputStream->open()
+ 		 path:audioflinger/AudioStreamOut.cpp:
+AudioStreamOut::open()
+1.2.2.1 hwDev()->openOutputStream()//打开音频输出流
+1.2.3PlaybackThread *playbackThread = (PlaybackThread *)thread.get()
+//获取音频输出线程
+1.2.4mPrimaryHardwareDev = playbackThread->getOutput()->audioHwDev
+//将传进来的module作为主音频接口
+1.2.4.1 mPrimaryHardwareDev->hwDevice()->setMode(mMode)
+1.3 mPlaybackThreads.add(*output, thread);
+
+
+
+3.11AudioPolicyManager：：getOutputForDevices
+
+1.openDirectOutput()
+getProfileForOutput()
+hwModule->getOutputProfiles()
+new SwAudioOutoputDescriptor()
+releaseMsdOutputPatches()
+outputDesc->open()
+outputDesc->close()
+addOutput()
+mpClientInterface->onAudioPortListUpdate()
+path:AudioPolicyClientImpl.cpp
+mAudioPolicyService->onAudioPortListUpdate()
+2.getOutputsForDevices()
+outputs.add(openOutputs.keyAt(i))
+3.selectOutput().
+
+
+3.15所学内容+AudioRecord.
+
+
+
+
+3.16 1.完善AudioFlinger::openOutput()和AudioPolicymanager::getOutputForDevices().
+2.熟悉AudioRecord.
+
+AudioRecord:
+1.
+path:AudioRecord.java
+code://初始化 AuidoTrack对象
+public AudioRecord(){...}
