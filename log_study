@@ -261,7 +261,7 @@ outputs.add(openOutputs.keyAt(i))
 3.16 1.完善AudioFlinger::openOutput()和AudioPolicymanager::getOutputForDevices().
 2.熟悉AudioRecord.
 
-AudioRecord:
+AudioRecord:(和AudioTrack的内容很类似，对比学习）
 1.
 path:AudioRecord.java
 code://初始化 AuidoTrack对象
