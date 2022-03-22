@@ -287,3 +287,42 @@ createRecord():
 lStatus = AudioSystem::getInputForAttr(...);
 RecordThread *thread = checkRecordThread_l(output.inputId);
 recordTrack = thread->createRecordTrack_l(...);
+
+
+3.17 AudioRecord::start(),read();MediaSession.
+
+在之前的 AudioTrack::set()中，有这样一句调用：AudioSystem::getOutputForAttr(),实际上这里用到了Binder转到IAudioPolicyService::getOutputForAttr(),在这里选择设备配置。并会创建一个playbackthread。这在之后的AudioFlinger::checkplaybackThread()中用到。
+
+同理， AudioRecord::set()中，有这样一句调用：AudioSystem::getInputForAttr(),这里也用到了Binder转到IAudioPolicyService::getInputForAttr(),在这里选择设备配置。并创建一个RecordThread.这在之后的AudioFlinger::checkRecordThread()中会用到。
+
+今天没有看audiorecord::start(),原因是在此函数中发现又有start()调用,没有找到对应的函数，搜索才发现此时应该到Tracks.cpp下面去找，这就和thread有关，所以将重点转到了recordthread.
+
+
+
+3.21 Audiorecord::start(),read(),mediasession.
+
+start()没看懂调用流程
+
+read():
+1.path:audiorecord.java:
+code:public int read() --> native_read_in_byte_array 
+2.path:jni/android_media_AudioRecord.cpp:
+code: 2.1 android_media_AudioRecord_readInArray() 
+2.1.1sp<AudioRecord> lpRecorder = getAudioRecord();
+2.1.2ssize_t readSize = lpRecorder->read();
+3. path:libaudioclient/AudioRecord.cpp:
+code:3.1 status_t err = obtainBuffer(...) --> AudioRecord::obtainBuffer()
+3.1.1  sp<AudioRecordClientProxy> proxy
+status = proxy->obtainBuffer()
+3.1.1.1path:AudioTrackShared.cpp
+code: ClientProxy::obtainBuffer()
+return status
+4. memcpy()
+5.releaseBuffer(&audioBuffer)  --> AudioRecord::releaseBuffer()
+5.1 mProxy->releaseBuffer()
+5.1.1 path:AudioTrackShared.cpp
+code:ClientProxy::releaseBuffer()
+
+mediasession:
+mediasession主要可以分为四大类，MediaBrowser,MediaController,MediaBrowserService,MediaSession.
+其中MediaBrowser,MediaController可以归属到客户端，MediaBrowserService,MediaSession归属到服务端，
